@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::future::pending;
@@ -9,7 +12,7 @@ use futures::{Sink, SinkExt, StreamExt, TryStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
-use tower_service::Service;
+use tower::Service;
 
 mod codec;
 mod serialize;
@@ -24,13 +27,14 @@ pub enum DuplexValue<Request, Response> {
     Response(u8, Response),
 }
 
-/// A [`tower_service::Service`] that implements a server and a client simultaneously over a duplex
+/// A [`tower::Service`] that implements a server and a client simultaneously over a duplex
 /// channel. As a server it is able to process RPC calls from a remote client, and as a client it is
 /// capable to make RPC calls to a remote server. It is very convinient in a system that requires
 /// asynchronous communication in both directions.
 pub struct DuplexService<Request, Response, S: Service<ServiceRequest>, ServiceRequest> {
     calls: mpsc::UnboundedReceiver<(Request, oneshot::Sender<Response>)>,
     service: S,
+    load: Arc<AtomicUsize>,
     _p: PhantomData<ServiceRequest>,
 }
 
@@ -38,6 +42,7 @@ pub struct DuplexService<Request, Response, S: Service<ServiceRequest>, ServiceR
 #[derive(Clone)]
 pub struct DuplexClient<Request, Response> {
     sender: mpsc::UnboundedSender<(Request, oneshot::Sender<Response>)>,
+    load: Arc<AtomicUsize>,
 }
 
 pub enum DuplexError<E1, E2> {
@@ -108,15 +113,18 @@ impl<Request, Response, S: Service<ServiceRequest>, ServiceRequest>
     /// Create a new server instance, with an associated client handle. The server stops if all the
     /// client handles are dropped.
     pub fn new_pair(service: S) -> (Self, DuplexClient<Request, Response>) {
+        let load = Arc::new(AtomicUsize::new(0));
         let (calls_sender, calls) = mpsc::unbounded_channel();
         (
             DuplexService {
                 calls,
                 service,
+                load: load.clone(),
                 _p: Default::default(),
             },
             DuplexClient {
                 sender: calls_sender,
+                load,
             },
         )
     }
@@ -167,7 +175,12 @@ impl<Request, Response, S: Service<ServiceRequest>, ServiceRequest>
                 send_fut.push(do_send(to_send, sender.take()));
             }
 
-            let DuplexService { service, calls, .. } = &mut self;
+            let DuplexService {
+                service,
+                calls,
+                load,
+                ..
+            } = &mut self;
             tokio::select! {
                 response = receiver.try_next() => {
                     match response {
@@ -189,6 +202,7 @@ impl<Request, Response, S: Service<ServiceRequest>, ServiceRequest>
                                 },
                             }
                             tagger.release_tag(tag);
+                            load.fetch_sub(1, SeqCst);
                         }
                         Err(err) => return Err(DuplexError::RemoteError(err)),
                         Ok(None) => return Err(DuplexError::RemoteHangUp)
@@ -204,6 +218,7 @@ impl<Request, Response, S: Service<ServiceRequest>, ServiceRequest>
                         tracing::trace!("Queued RPC call");
                         sending_queue.push_back((request, result_sender));
                     }
+                    load.fetch_add(1, SeqCst);
                 }
                 Some((result, tag)) = pending_calls.next() => {
                     // One of the executed calls is finished, send it back to the remote client (or server/client).
@@ -270,5 +285,13 @@ impl<Request, Response> Service<Request> for DuplexClient<Request, Response> {
         // from the future
         let _ = self.sender.send((req, reseponse_send));
         response_recv
+    }
+}
+
+impl<Request, Response> tower::load::Load for DuplexClient<Request, Response> {
+    type Metric = usize;
+
+    fn load(&self) -> Self::Metric {
+        self.load.load(SeqCst)
     }
 }

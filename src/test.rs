@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tower_service::Service;
+use tower::Service;
 
 use crate::DuplexService;
 
