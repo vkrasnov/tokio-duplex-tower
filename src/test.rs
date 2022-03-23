@@ -81,8 +81,9 @@ where
 async fn test_rt() {
     let rpcs_to_run = 1000;
 
-    let (r1, w1) = tokio::net::UnixStream::pair().unwrap();
-    let (r2, w2) = tokio::net::UnixStream::pair().unwrap();
+    let ((r1, w1), (r2, w2)) = tokio::net::UnixStream::pair()
+        .map(|(a, b)| (a.into_split(), b.into_split()))
+        .unwrap();
 
     let (serv1, mut client1): (DuplexService<Req1, Result<Resp1, ()>, _, Req2>, _) =
         DuplexService::new_pair(TestService::<Req2, Resp2>::default());
@@ -90,8 +91,8 @@ async fn test_rt() {
     let (serv2, mut client2): (DuplexService<Req2, Result<Resp2, ()>, _, Req1>, _) =
         DuplexService::new_pair(TestService::<Req1, Resp1>::default());
 
-    tokio::spawn(serv1.run(r1, w2));
-    tokio::spawn(serv2.run(r2, w1));
+    tokio::spawn(serv1.run(r1, w1));
+    tokio::spawn(serv2.run(r2, w2));
 
     let mut c1 = FuturesOrdered::new();
     let mut c2 = FuturesOrdered::new();
