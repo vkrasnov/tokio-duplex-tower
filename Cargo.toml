@@ -1,9 +1,10 @@
 [package]
-name = "tower_duplex"
+name = "tower-duplex"
 version = "0.1.0"
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "A tower service warpper built on top of tokio, that allows bi-directional RPC calls between two tower services"
+repository = "https://github.com/vkrasnov/tokio-duplex-tower"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 bincode = "1"
@@ -19,3 +20,4 @@ tracing = "0.1"
 proptest = "1"
 rand = "0.8"
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"

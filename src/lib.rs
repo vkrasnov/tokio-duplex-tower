@@ -27,10 +27,10 @@ pub enum DuplexValue<Request, Response> {
     Response(u8, Response),
 }
 
-/// A [`tower::Service`] that implements a server and a client simultaneously over a duplex
+/// A [`tower::Service`] that implements a server and a client simultaneously over a bi-directional
 /// channel. As a server it is able to process RPC calls from a remote client, and as a client it is
-/// capable to make RPC calls to a remote server. It is very convinient in a system that requires
-/// asynchronous communication in both directions.
+/// capable of making RPC calls into a remote server. It is very convinient in a system that
+/// requires asynchronous communication in both directions.
 pub struct DuplexService<Request, Response, S: Service<ServiceRequest>, ServiceRequest> {
     calls: mpsc::UnboundedReceiver<(Request, oneshot::Sender<Response>)>,
     service: S,
@@ -111,7 +111,47 @@ impl<Request, Response, S: Service<ServiceRequest>, ServiceRequest>
     const INIT_ARR: Option<oneshot::Sender<Response>> = None;
 
     /// Create a new server instance, with an associated client handle. The server stops if all the
-    /// client handles are dropped.
+    /// client handles are dropped. To start the server use the [`run`] or [`run_with`] methods.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use core::task::{Context, Poll};
+    ///
+    /// use tower_duplex::DuplexService;
+    ///
+    /// /// A Service that converts requests to lower or upper case
+    /// enum ChangeCase {
+    ///     ToLower,
+    ///     ToUpper,
+    /// }
+    ///
+    /// impl tower::Service<String> for ChangeCase {
+    ///     type Response = String;
+    ///     type Error = ();
+    ///     type Future = std::pin::Pin<
+    ///         Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    ///     >;
+    ///
+    ///     fn poll_ready(&mut self, _: &mut Context) -> Poll<Result<(), Self::Error>> {
+    ///         Poll::Ready(Ok(()))
+    ///     }
+    ///
+    ///     fn call(&mut self, req: String) -> Self::Future {
+    ///         let to_upper = matches!(self, ChangeCase::ToUpper);
+    ///         Box::pin(async move {
+    ///             if to_upper {
+    ///                 Ok(req.to_uppercase())
+    ///             } else {
+    ///                 Ok(req.to_lowercase())
+    ///             }
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// let (server, client): (DuplexService<String, String, _, _>, _) =
+    ///     DuplexService::new_pair(ChangeCase::ToUpper);
+    /// ```
     pub fn new_pair(service: S) -> (Self, DuplexClient<Request, Response>) {
         let load = Arc::new(AtomicUsize::new(0));
         let (calls_sender, calls) = mpsc::unbounded_channel();
@@ -250,6 +290,74 @@ where
 {
     /// Run the server loop with the provided [`AsyncRead`] and [`AsyncWrite`]. The server loop
     /// serves remote RPC calls, and handles local RPC calls from client handles.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use core::task::{Context, Poll};
+    ///
+    /// use tokio::sync::mpsc;
+    /// use tower::Service;
+    /// use tower_duplex::DuplexService;
+    ///
+    /// /// A Service that converts requests to lower or upper case
+    /// enum ChangeCase {
+    ///     ToLower,
+    ///     ToUpper,
+    /// }
+    ///
+    /// impl tower::Service<String> for ChangeCase {
+    ///     type Response = String;
+    ///     type Error = ();
+    ///     type Future = std::pin::Pin<
+    ///         Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    ///     >;
+    ///
+    ///     fn poll_ready(&mut self, _: &mut Context) -> Poll<Result<(), Self::Error>> {
+    ///         Poll::Ready(Ok(()))
+    ///     }
+    ///
+    ///     fn call(&mut self, req: String) -> Self::Future {
+    ///         let to_upper = matches!(self, ChangeCase::ToUpper);
+    ///         Box::pin(async move {
+    ///             if to_upper {
+    ///                 Ok(req.to_uppercase())
+    ///             } else {
+    ///                 Ok(req.to_lowercase())
+    ///             }
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     // `server1` handles serves requests from `server2` and converts strings to upper case.
+    ///     // It also forwards requests from `client1` to `server2`.
+    ///     let (server1, mut client1): (DuplexService<String, Result<String, ()>, _, _>, _) =
+    ///         DuplexService::new_pair(ChangeCase::ToUpper);
+    ///     // `server2` handles serves requests from `server1` and converts strings to lower case.
+    ///     // It also forwards requests from `client2` to `server1`.
+    ///     let (server2, mut client2): (DuplexService<String, Result<String, ()>, _, _>, _) =
+    ///         DuplexService::new_pair(ChangeCase::ToLower);
+    ///
+    ///     let ((r1, w1), (r2, w2)) = tokio::net::UnixStream::pair()
+    ///         .map(|(a, b)| (a.into_split(), b.into_split()))
+    ///         .unwrap();
+    ///
+    ///     tokio::spawn(server1.run(r1, w1));
+    ///     tokio::spawn(server2.run(r2, w2));
+    ///
+    ///     assert_eq!(
+    ///         client2.call("String".to_string()).await.unwrap().unwrap(),
+    ///         "STRING"
+    ///     );
+    ///
+    ///     assert_eq!(
+    ///         client1.call("String".to_string()).await.unwrap().unwrap(),
+    ///         "string"
+    ///     );
+    /// }
+    /// ```
     pub async fn run<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         self,
         reader: R,
@@ -293,5 +401,16 @@ impl<Request, Response> tower::load::Load for DuplexClient<Request, Response> {
 
     fn load(&self) -> Self::Metric {
         self.load.load(SeqCst)
+    }
+}
+
+impl<Request, Response> DuplexClient<Request, Response> {
+    pub async fn do_call(&self, req: Request) -> Result<Response, oneshot::error::RecvError> {
+        let (reseponse_send, response_recv) = oneshot::channel();
+        // We ignore the send error here, because if send fails it just means the service has
+        // stopped, in which case our oneshot will immediately get dropped and an error returned
+        // from the future
+        let _ = self.sender.send((req, reseponse_send));
+        response_recv.await
     }
 }
