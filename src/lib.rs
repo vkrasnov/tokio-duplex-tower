@@ -409,12 +409,16 @@ impl<Request, Response> tower::load::Load for DuplexClient<Request, Response> {
 }
 
 impl<Request, Response> DuplexClient<Request, Response> {
-    pub async fn do_call(&self, req: Request) -> Result<Response, oneshot::error::RecvError> {
+    /// A call that does not require a mutable reference
+    pub fn do_call(
+        &self,
+        req: Request,
+    ) -> impl Future<Output = Result<Response, oneshot::error::RecvError>> {
         let (reseponse_send, response_recv) = oneshot::channel();
         // We ignore the send error here, because if send fails it just means the service has
         // stopped, in which case our oneshot will immediately get dropped and an error returned
         // from the future
         let _ = self.sender.send((req, reseponse_send));
-        response_recv.await
+        response_recv
     }
 }

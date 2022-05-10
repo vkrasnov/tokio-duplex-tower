@@ -1,6 +1,6 @@
 [package]
 name = "tower-duplex"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2018"
 description = "A tower service warpper built on top of tokio, that allows bi-directional RPC calls between two tower services"
 repository = "https://github.com/vkrasnov/tokio-duplex-tower"

@@ -88,7 +88,7 @@ async fn test_rt() {
     let (serv1, mut client1): (DuplexService<Req1, Result<Resp1, ()>, _, Req2>, _) =
         DuplexService::new_pair(TestService::<Req2, Resp2>::default());
 
-    let (serv2, mut client2): (DuplexService<Req2, Result<Resp2, ()>, _, Req1>, _) =
+    let (serv2, client2): (DuplexService<Req2, Result<Resp2, ()>, _, Req1>, _) =
         DuplexService::new_pair(TestService::<Req1, Resp1>::default());
 
     tokio::spawn(serv1.run(r1, w1));
@@ -99,7 +99,7 @@ async fn test_rt() {
 
     for i in 0..rpcs_to_run {
         c1.push(client1.call(Req1(i.to_string())));
-        c2.push(client2.call(Req2(i)));
+        c2.push(client2.do_call(Req2(i)));
     }
 
     let (r1, r2) = futures::join!(c1.collect::<Vec<_>>(), c2.collect::<Vec<_>>());
